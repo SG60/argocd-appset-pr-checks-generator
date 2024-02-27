@@ -28,6 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: rui314/setup-mold@v1
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target.rust }}
@@ -46,8 +48,9 @@ jobs:
       - name: test
         run: nix-shell --command "cargo test"
       - name: build
-        run:
-          nix-shell --arg targetSystem \"${{ matrix.target.rust }}\" --command \
+        env:
+          TARGET_CC: clang
+        run: nix-shell --arg targetSystem \"${{ matrix.target.rust }}\" --run \
           "cargo build --target ${{ matrix.target.rust }} --release"
 
       - name: Login to Docker registry
