@@ -1,7 +1,7 @@
 FROM scratch
 ARG RUST_TARGET_DIR 
 
-COPY ${RUST_TARGET_DIR}/cd-webhooks-forwarder /
+COPY ${RUST_TARGET_DIR}/argocd-appset-checked-pr-generator /
 
-CMD [ "/cd-webhooks-forwarder" ]
+CMD [ "/argocd-appset-checked-pr-generator" ]
 

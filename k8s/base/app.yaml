@@ -2,12 +2,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: cd-webhooks-forwarder
-  namespace: cd-webhooks-forwarder
+  name: argocd-appset-checked-pr-generator
+  namespace: argocd-appset-checked-pr-generator
 spec:
   type: ClusterIP
   ports:
-    - name: cd-webhooks-forwarder
+    - name: argocd-appset-checked-pr-generator
       port: 80
       targetPort: 3000
 ---
@@ -15,7 +15,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cd-webhooks-forwarder
+  name: argocd-appset-checked-pr-generator
 spec:
   template:
     metadata:
@@ -23,11 +23,11 @@ spec:
         instrumentation.opentelemetry.io/inject-sdk: "true"
     spec:
       containers:
-        - name: cd-webhooks-forwarder
-          image: lhr.ocir.io/lrdyqp2xtoja/cd-webhooks-forwarder
+        - name: argocd-appset-checked-pr-generator
+          image: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator
           env:
             - name: RUST_LOG
-              value: cd_webhooks_forwarder=trace
+              value: argocd_appset_checked_pr_generator=trace
           resources:
             requests:
               cpu: 5m
@@ -38,3 +38,4 @@ spec:
       imagePullSecrets:
         - name: oracle-container-registry
 ---
+

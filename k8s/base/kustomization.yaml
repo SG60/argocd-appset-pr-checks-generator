@@ -2,7 +2,7 @@ resources:
   - app.yaml
 
 commonLabels:
-  app.kubernetes.io/name: cd-webhooks-forwarder
+  app.kubernetes.io/name: argocd-appset-checked-pr-generator
 
 labels:
   - pairs:

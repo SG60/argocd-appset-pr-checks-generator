@@ -1,5 +1,5 @@
 {
-  description = "Flake for cd-webhooks-forwarder";
+  description = "Flake for argo pr generator";
 
   outputs = { nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
