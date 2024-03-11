@@ -2,7 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 labels:
   - pairs:
-      app.kubernetes.io/version: 0a4359eaf08ceb22ba4208470bbdde5e1d7d04ad
+      app.kubernetes.io/version: 7eb785d704cf4e01e25e2f7bf6df54aff6cd9797
 commonLabels:
   app.kubernetes.io/instance: argocd-appset-checked-pr-generator
   app.kubernetes.io/name: argocd-appset-checked-pr-generator
@@ -10,6 +10,6 @@ resources:
   - ../../base
 namespace: argocd-appset-checked-pr-generator
 images:
-  - digest: sha256:5b31df91bfead4343720b092614f9b4e0bb418758a2d50b69418fcfdff76ada1
+  - digest: sha256:3e7a578552ee7564d66f215732412e9f2fd18361da17cf263beacbd7e3df86b6
     name: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator
-    newName: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator:sha-0a4359eaf08ceb22ba4208470bbdde5e1d7d04ad
+    newName: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator:sha-7eb785d704cf4e01e25e2f7bf6df54aff6cd9797
