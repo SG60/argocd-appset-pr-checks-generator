@@ -1,6 +1,6 @@
 use std::default;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -22,12 +22,13 @@ use ring::hmac;
 use serde_json::json;
 use tower::{Service, ServiceBuilder, ServiceExt};
 use tower_http::trace::TraceLayer;
-use tracing::{debug, debug_span, info, trace, Instrument};
+use tracing::{debug, debug_span, error, info, trace, Instrument};
 
 #[derive(Clone, Debug)]
 struct AppState {
-    hmac_verification_key: Option<hmac::Key>,
-    proxy_destinations: Vec<String>,
+    /// used by argocd to access this plugin
+    plugin_access_token: String,
+    github_app_token: String,
     client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
 }
 
@@ -45,8 +46,8 @@ impl Default for AppState {
             .to_owned();
 
         Self {
-            hmac_verification_key: default::Default::default(),
-            proxy_destinations: default::Default::default(),
+            plugin_access_token: default::Default::default(),
+            github_app_token: default::Default::default(),
             client: hyper_wrapped_client,
         }
     }
@@ -57,27 +58,14 @@ async fn main() -> Result<()> {
     // initialise tracing
     opentelemetry_tracing_utils::set_up_logging().expect("tracing setup should work");
 
-    // set the correct hmac secret
-    let hmac_verification_key =
-        if let Ok(github_webhook_secret) = std::env::var("GITHUB_WEBHOOK_SECRET") {
-            let hmac_verification_key =
-                hmac::Key::new(hmac::HMAC_SHA256, github_webhook_secret.as_bytes());
-            Some(hmac_verification_key)
-        } else {
-            None
-        };
+    // TODO: Get the auth token from a file or environment variable
+    let plugin_access_token = std::env::var("ARGOCD_PLUGIN_TOKEN")
+        .context("Missing plugin access token (ARGOCD_PLUGIN_TOKEN)")?;
 
     info!("starting up");
 
     let app_state = AppState {
-        hmac_verification_key,
-        // TODO: make this configurable through an env var or command line
-        proxy_destinations: vec![
-            // "http://httpbin.org/anything/put_anything".to_owned(),
-            "http://argocd-server.argocd:443/api/webhook".to_owned(),
-            "http://argocd-applicationset-controller.argocd:7000/api/webhook".to_owned(),
-            "http://kubechecks.kubechecks:8080/hooks/github/project".to_owned(),
-        ],
+        plugin_access_token,
         ..Default::default()
     };
 
@@ -100,10 +88,6 @@ fn app(state: AppState) -> Router {
         .route("/api/webhook", post(post_webhook_handler))
         .layer(
             ServiceBuilder::new()
-                .layer(middleware::from_fn_with_state(
-                    state.clone(),
-                    webhook_secret_verification_middleware,
-                ))
                 // tower_http trace logging
                 .layer(TraceLayer::new_for_http())
                 .map_request(opentelemetry_tracing_utils::extract_trace_context),
@@ -138,121 +122,7 @@ async fn post_webhook_handler(
         tracing::Span::current().context()
     );
 
-    match headers
-        .get("X-GitHub-Event")
-        // .ok_or(StatusCode::BAD_REQUEST)?
-        .and_then(|x| x.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?
-    {
-        "pull_request" | "push" => {
-            info!("forwarding");
-
-            let body_bytes = body.collect().await.unwrap().to_bytes();
-
-            debug!(
-                "current trace context: {:#?}",
-                tracing::Span::current().context()
-            );
-
-            let webhook_responses: Vec<_> = state
-                .proxy_destinations
-                .iter()
-                .map(|destination| {
-                    let mut new_parts = parts.clone();
-                    new_parts.uri = http::Uri::try_from(destination).unwrap();
-
-                    let request = hyper::Request::from_parts(new_parts, body_bytes.clone().into());
-
-                    let response_future = state.client.clone().call(request);
-
-                    async {
-                        let response = response_future.await.unwrap();
-
-                        let (parts, incoming_body) = response.into_parts();
-
-                        let status = parts.status;
-
-                        let body = incoming_body.collect().await.unwrap().to_bytes();
-                        let json = serde_json::from_slice::<serde_json::Value>(&body)
-                            .unwrap_or_else(|_| {
-                                let body_processed = String::from_utf8_lossy(&body);
-                                json!(body_processed)
-                            });
-
-                        debug!(?status, "{:?}", &json);
-
-                        IndividualWebhookResponse {
-                            body: json,
-                            source: destination.to_owned(),
-                            status: status.as_u16(),
-                        }
-                    }
-                    .instrument(debug_span!("async block"))
-                })
-                .collect::<futures::stream::FuturesUnordered<_>>()
-                .collect()
-                .instrument(debug_span!("forwarding webhook"))
-                .await;
-
-            let response_json = axum::Json(ResponseJsonPayload {
-                message: "webhook forwarded".to_owned(),
-                responses: webhook_responses,
-            });
-
-            info!("{:#?}", &response_json);
-
-            Ok(response_json)
-        }
-
-        _ => Err(StatusCode::BAD_REQUEST),
-    }
-}
-
-#[tracing::instrument(err, skip_all)]
-async fn webhook_secret_verification_middleware(
-    State(state): State<AppState>,
-    parts: axum::http::request::Parts,
-    body: Body,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    // If the github secret value has been set in the config, check it
-    let new_body = if let Some(ref hmac_verification_key) = state.hmac_verification_key {
-        let body_bytes = body.collect().await.unwrap().to_bytes();
-
-        trace!("{:?}", &body_bytes);
-
-        let github_signature_str = parts
-            .headers
-            .get("X-Hub-Signature-256")
-            .and_then(|x| x.to_str().ok())
-            .and_then(|x| x.strip_prefix("sha256="))
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-
-        // The signature has to be decoded from hexadecimal into bytes.
-        let github_signature =
-            hex::decode(github_signature_str).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-        debug!(
-            ?hmac_verification_key,
-            github_signature_str,
-            ?github_signature,
-            "hmac verification"
-        );
-
-        hmac::verify(hmac_verification_key, &body_bytes, &github_signature)
-            .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-        Body::from(body_bytes)
-    } else {
-        body
-    };
-
-    info!("hmac verification completed successfully");
-
-    // reconstruct a request from the parts and the body
-    let new_request = Request::from_parts(parts, new_body);
-
-    Ok(next.run(new_request).await)
+    Err(StatusCode::BAD_REQUEST)
 }
 
 #[cfg(test)]
@@ -260,6 +130,7 @@ mod tests {
     use std::str::FromStr;
 
     use axum::{body::Body, http::Request};
+    use indoc::indoc;
     use serde_json::json;
     use tower::ServiceExt;
     use wiremock::{
@@ -269,25 +140,33 @@ mod tests {
 
     use super::*;
 
-    // make test logs show up on the console
-    // use test_log::test;
-
-    // #[test(tokio::test)]
     #[tokio::test]
-    async fn pull_request_synchronised() {
-        opentelemetry_tracing_utils::set_up_logging().unwrap();
+    async fn successful_getparams_request() {
+        let _ = opentelemetry_tracing_utils::set_up_logging();
 
-        // https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries#testing-the-webhook-payload-validation
-        // Payloads, secret and signatures from GitHub page on validation
-        let github_webhook_secret = "It's a Secret to Everybody";
-        let body_content = "Hello, World!";
+        let argocd_plugin_token = "very-secret-auth-token";
+
+        // input from the argocd application set
+        let body_content = indoc! { r#"
+            {
+                "applicationSetName": "appset-12345",
+                "input": {
+                    "parameters": {
+                        "branch_name": "feature-branch-2",
+                        "repo_owner": "a-github-user",
+                        "repo_name": "asdfasdfadfs",
+                        "required_checks": ["build", "test"]
+                    }
+                }
+            }
+            "#};
         let request_body = Body::from(body_content);
 
         // Start a background mock HTTP server on a random local port
         let mock_server = MockServer::start().await;
 
-        // Arrange the behaviour of the MockServer adding a Mock:
-        // when it receives a GET request on '/hello' it will respond with a 200.
+        // Arrange the behaviour of the MockServer adding a Mock
+        // This should mock the github api response?!
         Mock::given(method("POST"))
             .and(matchers::path("/webhook"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -303,13 +182,10 @@ mod tests {
             .await;
 
         let app_state = AppState {
-            hmac_verification_key: Some(hmac::Key::new(
-                hmac::HMAC_SHA256,
-                github_webhook_secret.as_bytes(),
-            )),
-            proxy_destinations: vec![format!("{}/webhook", mock_server.uri())],
             ..Default::default()
         };
+
+        debug!(body_content, "Request Details. Body: {}", body_content);
 
         let app = app(app_state);
         // `Router` implements `tower::Service<Request<Body>>` so we can
@@ -317,18 +193,27 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/webhook")
+                    .uri("/api/v1/getparams.execute")
                     .method("POST")
-                    .header("X-GitHub-Event", "pull_request")
-                    .header(
-                        "X-Hub-Signature-256",
-                        "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17",
-                    )
+                    .header("Authorization", format!("Bearer {}", argocd_plugin_token))
                     .body(request_body)
                     .unwrap(),
             )
             .await
             .unwrap();
+
+        // Response should be equivalent to this
+        let expected_response = indoc! {r#"
+            {
+                "output": {
+                    "parameters": [
+                        {
+                            "most_recent_successful_sha": "asdf34easdf"
+                        }
+                    ]
+                }
+            }
+        "#};
 
         let (parts, body) = response.into_parts();
         let body_string: String = String::from_utf8(
@@ -342,10 +227,41 @@ mod tests {
         debug!("{:?}", &parts);
         let body_json = serde_json::Value::from_str(&body_string);
         debug!("{:?}", &body_string);
-        debug!("{:?}", &body_json);
+        debug!("Expected JSON response: {}", &expected_response);
 
         assert_eq!(parts.status, StatusCode::OK);
         assert!(body_string.contains("forwarded"));
         assert!(body_string.contains("webhook info info info"));
+    }
+
+    #[tokio::test]
+    async fn unauthenticated() {
+        let _ = opentelemetry_tracing_utils::set_up_logging();
+
+        let argocd_plugin_token = "very-secret-auth-token";
+
+        // `Router` implements `tower::Service<Request<Body>>` so we can
+        // call it like any tower service, no need to run an HTTP server.
+        let response = app(AppState {
+            plugin_access_token: argocd_plugin_token.to_string(),
+            ..Default::default()
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/getparams.execute")
+                .method("POST")
+                .header("Authorization", "Bearer not-the-correct-token")
+                .body(Body::from("Hello, World!"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let response_status = response.status();
+
+        debug!(?response_status, "Response Received");
+
+        // the request should be forbidden due to incorrect token
+        assert_eq!(response_status, StatusCode::FORBIDDEN);
     }
 }
