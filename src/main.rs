@@ -3,16 +3,13 @@ use std::{default, fmt::Debug, sync::Arc};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
-    body::Body,
-    extract::{Request, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::post,
     Router,
 };
-use futures::StreamExt;
-use http_body_util::BodyExt;
 use hyper::body::Bytes;
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
@@ -31,8 +28,8 @@ use tracing::{debug, info, instrument, trace};
 struct AppState {
     /// used by argocd to access this plugin
     plugin_access_token: String,
-    /// An octocrab client to get stuff from GitHub
     client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
+    /// An octocrab client to get stuff from GitHub
     github_data_getter: std::sync::Arc<dyn GetDataFromGitHub>,
 }
 
@@ -57,6 +54,10 @@ impl Default for AppState {
     }
 }
 
+fn set_up_octocrab_client(github_app_token: String) -> octocrab::Octocrab {
+    unimplemented!()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // initialise tracing
@@ -69,6 +70,8 @@ async fn main() -> Result<()> {
         .context("Missing plugin access token (ARGOCD_PLUGIN_TOKEN)")?;
 
     info!("starting up");
+
+    let octocrab_client = Arc::new(set_up_octocrab_client(github_app_token));
 
     let app_state = AppState {
         plugin_access_token,
