@@ -1,6 +1,7 @@
-use std::default;
+use std::{default, fmt::Debug};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -17,12 +18,16 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
+#[cfg(test)]
+use mockall::automock;
+use octocrab::{models::checks::ListCheckRuns, params::repos::Commitish};
 use opentelemetry_tracing_utils::{OpenTelemetrySpanExt, TracingLayer, TracingService};
 use ring::hmac;
+use serde::Deserialize;
 use serde_json::json;
 use tower::{Service, ServiceBuilder, ServiceExt};
 use tower_http::trace::TraceLayer;
-use tracing::{debug, debug_span, error, info, trace, Instrument};
+use tracing::{debug, debug_span, error, info, instrument, trace, Instrument};
 
 #[derive(Clone, Debug)]
 struct AppState {
@@ -30,6 +35,7 @@ struct AppState {
     plugin_access_token: String,
     github_app_token: String,
     client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
+    github_data_getter: std::sync::Arc<dyn GetDataFromGitHub>,
 }
 
 impl Default for AppState {
@@ -46,6 +52,7 @@ impl Default for AppState {
             .to_owned();
 
         Self {
+            github_data_getter: std::sync::Arc::new(octocrab::Octocrab::default()),
             plugin_access_token: default::Default::default(),
             github_app_token: default::Default::default(),
             client: hyper_wrapped_client,
@@ -85,14 +92,38 @@ async fn main() -> Result<()> {
 fn app(state: AppState) -> Router {
     info!("creating router");
     Router::new()
-        .route("/api/webhook", post(post_webhook_handler))
+        .route("/api/v1/getparams.execute", post(post_getparams_handler))
         .layer(
             ServiceBuilder::new()
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    verify_bearer_auth_secret,
+                ))
                 // tower_http trace logging
                 .layer(TraceLayer::new_for_http())
                 .map_request(opentelemetry_tracing_utils::extract_trace_context),
         )
         .with_state(state)
+}
+
+#[tracing::instrument(err, skip_all)]
+async fn verify_bearer_auth_secret(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if format!("Bearer {}", state.plugin_access_token) != auth_header {
+        return Err(StatusCode::FORBIDDEN);
+    } else {
+        info!("auth verification successful");
+        return Ok(next.run(request).await);
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -108,41 +139,134 @@ struct IndividualWebhookResponse {
 }
 
 #[tracing::instrument(ret, err, skip(state, parts, body))]
-async fn post_webhook_handler(
+async fn post_getparams_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     parts: axum::http::request::Parts,
-    body: Body,
+    body: axum::extract::Json<JsonPayloadInputFromArgoCD>,
     // body: String,
 ) -> Result<axum::Json<ResponseJsonPayload>, StatusCode> {
-    debug!("{:?}", &headers);
-
     debug!(
-        "current trace context: {:#?}",
-        tracing::Span::current().context()
+        "post value handler
+Headers: {:?}
+Parts: {:?}
+Body: {:?}",
+        &headers, &parts, &body
     );
 
-    Err(StatusCode::BAD_REQUEST)
+    let vec_of_check_runs = state
+        .github_data_getter
+        .get_successful_check_runs_for_xxx(
+            body.input.parameters.repo_owner.to_owned(),
+            body.input.parameters.repo_name.to_owned(),
+            body.input.parameters.branch_name.to_owned(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    debug!("Result of call: {:?}", vec_of_check_runs);
+
+    unimplemented!();
+    // Err(StatusCode::BAD_REQUEST)
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct JsonPayloadInputFromArgoCD {
+    application_set_name: String,
+    input: JsonArgoCDInput,
+}
+#[derive(Deserialize, Debug)]
+struct JsonArgoCDInput {
+    parameters: ArgoCDParameters,
+}
+#[derive(Deserialize, Debug)]
+struct ArgoCDParameters {
+    branch_name: String,
+    repo_owner: String,
+    repo_name: String,
+    required_checks: Vec<String>,
+}
+
+#[cfg_attr(test, automock)]
+#[async_trait]
+trait GetDataFromGitHub: Send + Sync + Debug + 'static {
+    async fn get_successful_check_runs_for_xxx(
+        &self,
+        owner: String,
+        repo: String,
+        branch: String,
+    ) -> anyhow::Result<Vec<CheckRun>>;
+}
+
+#[derive(Debug, Clone)]
+struct CheckRun {
+    conclusion: CheckConclusion,
+    head_sha: String,
+}
+#[derive(Debug, Clone)]
+enum CheckConclusion {
+    Success,
+    Failure,
+}
+#[async_trait]
+impl GetDataFromGitHub for octocrab::Octocrab {
+    #[instrument(ret, skip(self))]
+    async fn get_successful_check_runs_for_xxx(
+        &self,
+        owner: String,
+        repo: String,
+        branch: String,
+    ) -> anyhow::Result<Vec<CheckRun>> {
+        let checks = &self.checks(owner, repo);
+
+        let checks = checks
+            .list_check_runs_for_git_ref(Commitish("heads/".to_owned() + &branch))
+            .send()
+            .await
+            .context("Failed call to GitHub Checks API")?;
+
+        // checks.check_runs.iter().find(|element| element.conclusion);
+
+        let x = vec![CheckRun {
+            conclusion: (match "asdf" {
+                "success" => CheckConclusion::Success,
+                _ => CheckConclusion::Failure,
+            }),
+            head_sha: "asdfd".to_owned(),
+        }];
+
+        debug!("Checks: {:?}", checks);
+
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, sync::Arc};
 
     use axum::{body::Body, http::Request};
     use indoc::indoc;
+    use mockall::predicate::eq;
+    use opentelemetry_tracing_utils::LoggingSetupBuilder;
     use serde_json::json;
     use tower::ServiceExt;
-    use wiremock::{
-        matchers::{self, method},
-        Mock, MockServer, ResponseTemplate,
-    };
 
     use super::*;
 
+    fn test_setup() {
+        let _ = LoggingSetupBuilder {
+            use_test_writer: true,
+            pretty_logs: true,
+            otlp_output_enabled: false,
+        }
+        .build();
+    }
+
     #[tokio::test]
     async fn successful_getparams_request() {
-        let _ = opentelemetry_tracing_utils::set_up_logging();
+        test_setup();
 
         let argocd_plugin_token = "very-secret-auth-token";
 
@@ -162,28 +286,29 @@ mod tests {
             "#};
         let request_body = Body::from(body_content);
 
-        // Start a background mock HTTP server on a random local port
-        let mock_server = MockServer::start().await;
-
-        // Arrange the behaviour of the MockServer adding a Mock
-        // This should mock the github api response?!
-        Mock::given(method("POST"))
-            .and(matchers::path("/webhook"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "message": "stuff stuff stuff",
-                "webhook_data_1": "webhook info info info"
-            })))
-            .expect(1)
-            // We assign a name to the mock - it will be shown in error messages
-            // if our expectation is not verified!
-            .named("webhook 1")
-            // Mounting the mock on the mock server - it's now effective!
-            .mount(&mock_server)
-            .await;
+        let mut mock_github_getter = MockGetDataFromGitHub::new();
+        mock_github_getter
+            .expect_get_successful_check_runs_for_xxx()
+            .times(1)
+            .with(
+                eq("a-github-user".to_owned()),
+                eq("asdfasdfadfs".to_owned()),
+                eq("feature-branch-2".to_owned()),
+            )
+            .returning(|_, _, _| {
+                Ok(vec![CheckRun {
+                    head_sha: "asdf".to_owned(),
+                    conclusion: CheckConclusion::Success,
+                }])
+            });
 
         let app_state = AppState {
+            plugin_access_token: argocd_plugin_token.to_string(),
+            github_data_getter: Arc::new(mock_github_getter),
             ..Default::default()
         };
+
+        debug!(?app_state, "Server App State");
 
         debug!(body_content, "Request Details. Body: {}", body_content);
 
@@ -196,6 +321,7 @@ mod tests {
                     .uri("/api/v1/getparams.execute")
                     .method("POST")
                     .header("Authorization", format!("Bearer {}", argocd_plugin_token))
+                    .header("Content-Type", "application/json")
                     .body(request_body)
                     .unwrap(),
             )
@@ -225,9 +351,10 @@ mod tests {
         .unwrap();
 
         debug!("{:?}", &parts);
-        let body_json = serde_json::Value::from_str(&body_string);
         debug!("{:?}", &body_string);
         debug!("Expected JSON response: {}", &expected_response);
+        let body_json = serde_json::Value::from_str(&body_string).unwrap();
+        debug!("Received JSON: {}", body_json);
 
         assert_eq!(parts.status, StatusCode::OK);
         assert!(body_string.contains("forwarded"));
@@ -236,14 +363,12 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated() {
-        let _ = opentelemetry_tracing_utils::set_up_logging();
-
-        let argocd_plugin_token = "very-secret-auth-token";
+        test_setup();
 
         // `Router` implements `tower::Service<Request<Body>>` so we can
         // call it like any tower service, no need to run an HTTP server.
         let response = app(AppState {
-            plugin_access_token: argocd_plugin_token.to_string(),
+            plugin_access_token: "very-secret-auth-token".to_string(),
             ..Default::default()
         })
         .oneshot(
