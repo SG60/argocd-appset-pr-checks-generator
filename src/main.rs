@@ -31,7 +31,6 @@ use tracing::{debug, info, instrument, trace};
 struct AppState {
     /// used by argocd to access this plugin
     plugin_access_token: String,
-    github_app_token: String,
     /// An octocrab client to get stuff from GitHub
     client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
     github_data_getter: std::sync::Arc<dyn GetDataFromGitHub>,
@@ -53,7 +52,6 @@ impl Default for AppState {
         Self {
             github_data_getter: std::sync::Arc::new(octocrab::Octocrab::default()),
             plugin_access_token: default::Default::default(),
-            github_app_token: default::Default::default(),
             client: hyper_wrapped_client,
         }
     }
@@ -64,7 +62,9 @@ async fn main() -> Result<()> {
     // initialise tracing
     opentelemetry_tracing_utils::set_up_logging().expect("tracing setup should work");
 
-    // TODO: Get the auth token from a file or environment variable
+    let github_app_token = std::env::var("GITHUB_APP_TOKEN")
+        .context("Missing plugin access token (GITHUB_APP_TOKEN)")?;
+
     let plugin_access_token = std::env::var("ARGOCD_PLUGIN_TOKEN")
         .context("Missing plugin access token (ARGOCD_PLUGIN_TOKEN)")?;
 
@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
 
     let app_state = AppState {
         plugin_access_token,
+        github_data_getter: octocrab_client,
         ..Default::default()
     };
 
@@ -127,8 +128,7 @@ async fn verify_bearer_auth_secret(
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ResponseJsonPayload {
-    message: String,
-    responses: Vec<IndividualWebhookResponse>,
+    output: ResponseJsonPayloadOutput,
 }
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ResponseJsonPayloadOutput {
@@ -372,35 +372,28 @@ mod tests {
             .unwrap();
 
         // Response should be equivalent to this
-        let expected_response = indoc! {r#"
-            {
-                "output": {
-                    "parameters": [
-                        {
-                            "most_recent_successful_sha": "asdf34easdf"
-                        }
-                    ]
-                }
+        let expected_response_body = json!({
+            "output": {
+                "parameters": [{"most_recent_successful_sha": successful_sha_for_test}]
             }
-        "#};
+        });
 
         let (parts, body) = response.into_parts();
         let body_string: String = String::from_utf8(
             axum::body::to_bytes(body, usize::MAX)
-        trace!("response parts: {:?}", &parts);
-
+                .await
+                .unwrap()
+                .to_vec(),
         )
         .unwrap();
 
-        debug!("{:?}", &parts);
-        debug!("{:?}", &body_string);
-        debug!("Expected JSON response: {}", &expected_response);
+        trace!("response parts: {:?}", &parts);
+
         let body_json = serde_json::Value::from_str(&body_string).unwrap();
         debug!("Received JSON: {}", body_json);
 
         assert_eq!(parts.status, StatusCode::OK);
-        assert!(body_string.contains("forwarded"));
-        assert!(body_string.contains("webhook info info info"));
+        assert_eq!(body_json, expected_response_body);
     }
 
     #[tokio::test]
