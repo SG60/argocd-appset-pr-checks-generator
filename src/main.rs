@@ -1,4 +1,4 @@
-use std::{default, fmt::Debug};
+use std::{default, fmt::Debug, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,20 +20,19 @@ use hyper_util::{
 };
 #[cfg(test)]
 use mockall::automock;
-use octocrab::{models::checks::ListCheckRuns, params::repos::Commitish};
-use opentelemetry_tracing_utils::{OpenTelemetrySpanExt, TracingLayer, TracingService};
-use ring::hmac;
+use octocrab::params::repos::Commitish;
+use opentelemetry_tracing_utils::{TracingLayer, TracingService};
 use serde::Deserialize;
-use serde_json::json;
-use tower::{Service, ServiceBuilder, ServiceExt};
+use tower::{ServiceBuilder, ServiceExt};
 use tower_http::trace::TraceLayer;
-use tracing::{debug, debug_span, error, info, instrument, trace, Instrument};
+use tracing::{debug, info, instrument, trace};
 
 #[derive(Clone, Debug)]
 struct AppState {
     /// used by argocd to access this plugin
     plugin_access_token: String,
     github_app_token: String,
+    /// An octocrab client to get stuff from GitHub
     client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
     github_data_getter: std::sync::Arc<dyn GetDataFromGitHub>,
 }
@@ -132,10 +131,12 @@ struct ResponseJsonPayload {
     responses: Vec<IndividualWebhookResponse>,
 }
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct IndividualWebhookResponse {
-    source: String,
-    status: u16,
-    body: serde_json::Value,
+struct ResponseJsonPayloadOutput {
+    parameters: Vec<ResponseParameters>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ResponseParameters {
+    most_recent_successful_sha: String,
 }
 
 #[tracing::instrument(ret, err, skip(state, parts, body))]
@@ -154,26 +155,58 @@ Body: {:?}",
         &headers, &parts, &body
     );
 
-    let vec_of_check_runs = state
-        .github_data_getter
-        .get_successful_check_runs_for_xxx(
-            body.input.parameters.repo_owner.to_owned(),
-            body.input.parameters.repo_name.to_owned(),
-            body.input.parameters.branch_name.to_owned(),
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parameters = &body.input.parameters;
+
+    let mut vec_of_check_runs: Vec<CheckRun> = vec![];
+
+    for required_check in &parameters.required_checks {
+        let mut vec_of_runs_for_check = state
+            .github_data_getter
+            .get_check_runs_for_git_branch(
+                parameters.repo_owner.to_owned(),
+                parameters.repo_name.to_owned(),
+                parameters.branch_name.to_owned(),
+                required_check.to_owned(),
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        vec_of_check_runs.append(&mut vec_of_runs_for_check);
+    }
 
     debug!("Result of call: {:?}", vec_of_check_runs);
 
-    unimplemented!();
-    // Err(StatusCode::BAD_REQUEST)
+    let successful_runs = vec_of_check_runs
+        .iter()
+        .filter_map(|el| match el.conclusion {
+            CheckConclusion::Success => Some(el.head_sha.clone()),
+            _ => None,
+        });
+
+    todo!("need to implement getting the most recent check");
+
+    trace!(
+        "Successful Runs: {:?}",
+        successful_runs.clone().collect::<Vec<_>>()
+    );
+
+    let response_parameters = ResponseParameters {
+        most_recent_successful_sha: "asdf".to_owned(),
+    };
+
+    let result: ResponseJsonPayload = ResponseJsonPayload {
+        output: ResponseJsonPayloadOutput {
+            parameters: vec![response_parameters],
+        },
+    };
+
+    Ok(axum::Json(result))
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct JsonPayloadInputFromArgoCD {
-    application_set_name: String,
+    // application_set_name: String,
     input: JsonArgoCDInput,
 }
 #[derive(Deserialize, Debug)]
@@ -191,11 +224,17 @@ struct ArgoCDParameters {
 #[cfg_attr(test, automock)]
 #[async_trait]
 trait GetDataFromGitHub: Send + Sync + Debug + 'static {
-    async fn get_successful_check_runs_for_xxx(
+    /// Get completed checks for the specified git branch and requested check name
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the Github API request fails
+    async fn get_check_runs_for_git_branch(
         &self,
         owner: String,
         repo: String,
         branch: String,
+        check_name: String,
     ) -> anyhow::Result<Vec<CheckRun>>;
 }
 
@@ -212,11 +251,12 @@ enum CheckConclusion {
 #[async_trait]
 impl GetDataFromGitHub for octocrab::Octocrab {
     #[instrument(ret, skip(self))]
-    async fn get_successful_check_runs_for_xxx(
+    async fn get_check_runs_for_git_branch(
         &self,
         owner: String,
         repo: String,
         branch: String,
+        check_name: String,
     ) -> anyhow::Result<Vec<CheckRun>> {
         let checks = &self.checks(owner, repo);
 
@@ -226,19 +266,19 @@ impl GetDataFromGitHub for octocrab::Octocrab {
             .await
             .context("Failed call to GitHub Checks API")?;
 
-        // checks.check_runs.iter().find(|element| element.conclusion);
+        trace!("Checks: {:?}", checks.clone(),);
 
-        let x = vec![CheckRun {
-            conclusion: (match "asdf" {
-                "success" => CheckConclusion::Success,
-                _ => CheckConclusion::Failure,
-            }),
-            head_sha: "asdfd".to_owned(),
-        }];
-
-        debug!("Checks: {:?}", checks);
-
-        unimplemented!()
+        Ok(checks
+            .check_runs
+            .iter()
+            .map(|element| CheckRun {
+                head_sha: element.head_sha.clone(),
+                conclusion: (match element.conclusion.as_deref() {
+                    Some("Success") => CheckConclusion::Success,
+                    _ => CheckConclusion::Failure,
+                }),
+            })
+            .collect())
     }
 }
 
@@ -286,18 +326,21 @@ mod tests {
             "#};
         let request_body = Body::from(body_content);
 
+        let successful_sha_for_test = "asdfasdf33333";
+
         let mut mock_github_getter = MockGetDataFromGitHub::new();
         mock_github_getter
-            .expect_get_successful_check_runs_for_xxx()
+            .expect_get_check_runs_for_git_branch()
             .times(1)
             .with(
                 eq("a-github-user".to_owned()),
                 eq("asdfasdfadfs".to_owned()),
                 eq("feature-branch-2".to_owned()),
+                eq("build".to_owned()),
             )
-            .returning(|_, _, _| {
+            .returning(|_, _, _, _| {
                 Ok(vec![CheckRun {
-                    head_sha: "asdf".to_owned(),
+                    head_sha: successful_sha_for_test.to_owned(),
                     conclusion: CheckConclusion::Success,
                 }])
             });
@@ -344,9 +387,8 @@ mod tests {
         let (parts, body) = response.into_parts();
         let body_string: String = String::from_utf8(
             axum::body::to_bytes(body, usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
+        trace!("response parts: {:?}", &parts);
+
         )
         .unwrap();
 
