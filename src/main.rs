@@ -1,6 +1,4 @@
-use std::{default, fmt::Debug, sync::Arc};
-
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use axum::{
     extract::State,
@@ -10,17 +8,12 @@ use axum::{
     routing::post,
     Router,
 };
-use hyper::body::Bytes;
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
-};
 #[cfg(test)]
 use mockall::automock;
 use octocrab::params::repos::Commitish;
-use opentelemetry_tracing_utils::{TracingLayer, TracingService};
 use serde::Deserialize;
-use tower::{ServiceBuilder, ServiceExt};
+use std::{collections::HashMap, default, fmt::Debug, sync::Arc};
+use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, trace};
 
@@ -28,34 +21,36 @@ use tracing::{debug, info, instrument, trace};
 struct AppState {
     /// used by argocd to access this plugin
     plugin_access_token: String,
-    client: TracingService<Client<HttpConnector, http_body_util::Full<Bytes>>>,
     /// An octocrab client to get stuff from GitHub
     github_data_getter: std::sync::Arc<dyn GetDataFromGitHub>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        let hyper_client =
-            Client::builder(TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
-
-        let tower_service_stack = ServiceBuilder::new()
-            .layer(TracingLayer)
-            .service(hyper_client);
-
-        let hyper_wrapped_client = futures::executor::block_on(tower_service_stack.clone().ready())
-            .expect("should be valid")
-            .to_owned();
-
         Self {
             github_data_getter: std::sync::Arc::new(octocrab::Octocrab::default()),
             plugin_access_token: default::Default::default(),
-            client: hyper_wrapped_client,
         }
     }
 }
 
-fn set_up_octocrab_client(github_app_token: String) -> octocrab::Octocrab {
-    unimplemented!()
+#[instrument]
+fn set_up_octocrab_client(
+    github_app_id: String,
+    github_app_private_key: String,
+) -> octocrab::Octocrab {
+    let octocrab = octocrab::OctocrabBuilder::new().app(
+        github_app_id
+            .parse::<u64>()
+            .expect("should be valid u64 app ID")
+            .into(),
+        jsonwebtoken::EncodingKey::from_rsa_pem(github_app_private_key.as_bytes())
+            .expect("should be a valid rsa pem value"),
+    );
+
+    octocrab
+        .build()
+        .expect("This should produce a valid octocrab client")
 }
 
 #[tokio::main]
@@ -63,27 +58,39 @@ async fn main() -> Result<()> {
     // initialise tracing
     opentelemetry_tracing_utils::set_up_logging().expect("tracing setup should work");
 
-    let github_app_token = std::env::var("GITHUB_APP_TOKEN")
-        .context("Missing plugin access token (GITHUB_APP_TOKEN)")?;
+    let github_app_private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")
+        .context("Missing plugin access token (GITHUB_APP_PRIVATE_KEY)")?;
+    let github_app_id =
+        std::env::var("GITHUB_APP_ID").context("Missing plugin access token (GITHUB_APP_ID)")?;
 
     let plugin_access_token = std::env::var("ARGOCD_PLUGIN_TOKEN")
         .context("Missing plugin access token (ARGOCD_PLUGIN_TOKEN)")?;
 
     info!("starting up");
 
-    let octocrab_client = Arc::new(set_up_octocrab_client(github_app_token));
+    let octocrab_client = Arc::new(set_up_octocrab_client(
+        github_app_id,
+        github_app_private_key,
+    ));
+
+    // let installations = octocrab_client.apps().installations().send().await?;
+    // dbg!(installations);
 
     let app_state = AppState {
         plugin_access_token,
         github_data_getter: octocrab_client,
-        ..Default::default()
     };
 
     // build our application with a single route
     let app = app(app_state);
 
+    let address_to_bind = "0.0.0.0:3000";
     // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(address_to_bind)
+        .await
+        .unwrap();
+    info!("Now listening on: {address_to_bind}");
+
     axum::serve(listener, app).await.unwrap();
 
     opentelemetry_tracing_utils::shutdown_tracer_provider();
@@ -148,7 +155,6 @@ async fn post_getparams_handler(
     headers: HeaderMap,
     parts: axum::http::request::Parts,
     body: axum::extract::Json<JsonPayloadInputFromArgoCD>,
-    // body: String,
 ) -> Result<axum::Json<ResponseJsonPayload>, StatusCode> {
     debug!(
         "post value handler
@@ -160,46 +166,26 @@ Body: {:?}",
 
     let parameters = &body.input.parameters;
 
-    let mut vec_of_check_runs: Vec<CheckRun> = vec![];
-
-    for required_check in &parameters.required_checks {
-        let mut vec_of_runs_for_check = state
-            .github_data_getter
-            .get_check_runs_for_git_branch(
-                parameters.repo_owner.to_owned(),
-                parameters.repo_name.to_owned(),
-                parameters.branch_name.to_owned(),
-                required_check.to_owned(),
-            )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        vec_of_check_runs.append(&mut vec_of_runs_for_check);
+    if parameters.required_checks.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
-    debug!("Result of call: {:?}", vec_of_check_runs);
-
-    let successful_runs = vec_of_check_runs
-        .iter()
-        .filter_map(|el| match el.conclusion {
-            CheckConclusion::Success => Some(el.head_sha.clone()),
-            _ => None,
-        });
-
-    todo!("need to implement getting the most recent check");
-
-    trace!(
-        "Successful Runs: {:?}",
-        successful_runs.clone().collect::<Vec<_>>()
-    );
-
-    let response_parameters = ResponseParameters {
-        most_recent_successful_sha: "asdf".to_owned(),
-    };
+    let most_recent_successful_sha = state
+        .github_data_getter
+        .get_first_successful_check_runs_for_git_branch(
+            parameters.repo_owner.to_owned(),
+            parameters.repo_name.to_owned(),
+            parameters.branch_name.to_owned(),
+            parameters.required_checks.clone(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let result: ResponseJsonPayload = ResponseJsonPayload {
         output: ResponseJsonPayloadOutput {
-            parameters: vec![response_parameters],
+            parameters: vec![ResponseParameters {
+                most_recent_successful_sha,
+            }],
         },
     };
 
@@ -224,64 +210,161 @@ struct ArgoCDParameters {
     required_checks: Vec<String>,
 }
 
-#[cfg_attr(test, automock)]
-#[async_trait]
-trait GetDataFromGitHub: Send + Sync + Debug + 'static {
-    /// Get completed checks for the specified git branch and requested check name
+trait GetSuccessfulCheckRuns: GetDataFromGitHub {
+    /// Get completed checks for the specified git branch
     ///
     /// # Errors
     ///
     /// This function will return an error if the Github API request fails
-    async fn get_check_runs_for_git_branch(
+    #[instrument(ret, err)]
+    async fn get_first_successful_check_runs_for_git_branch(
         &self,
         owner: String,
         repo: String,
         branch: String,
-        check_name: String,
-    ) -> anyhow::Result<Vec<CheckRun>>;
+        check_names: Vec<String>,
+    ) -> anyhow::Result<String> {
+        let max_commits_to_try = 10;
+
+        let mut successful_sha: Option<String> = None;
+        let mut next_git_ref_to_check = "heads/".to_owned() + &branch;
+        let mut commits_tried = 0;
+        while successful_sha.is_none() && commits_tried < max_commits_to_try {
+            let check_runs_for_current_ref = self
+                .get_check_runs_for_git_ref(
+                    owner.clone(),
+                    repo.clone(),
+                    next_git_ref_to_check.clone(),
+                )
+                .await?;
+
+            successful_sha = Some(check_runs_for_current_ref.head_sha);
+
+            for i in &check_names {
+                match check_runs_for_current_ref
+                    .check_runs
+                    .get(i)
+                    .map(|x| &x.conclusion)
+                {
+                    Some(CheckConclusion::Success) => {}
+                    _ => {
+                        successful_sha = None;
+                        next_git_ref_to_check = check_runs_for_current_ref.parent_sha;
+                        break;
+                    }
+                }
+            }
+            commits_tried += 1;
+        }
+
+        debug!(
+            commits_tried,
+            successful_sha, "Finished getting commit checks"
+        );
+
+        match successful_sha {
+            Some(expr) => Ok(expr),
+            None => Err(anyhow!(
+                "No valid commits within {max_commits_to_try} commits"
+            )),
+        }
+    }
+}
+
+impl<T: ?Sized + GetDataFromGitHub> GetSuccessfulCheckRuns for T {}
+
+#[cfg_attr(test, automock)]
+#[async_trait]
+trait GetDataFromGitHub: Send + Sync + Debug + 'static {
+    async fn get_check_runs_for_git_ref(
+        &self,
+        owner: String,
+        repo: String,
+        git_ref: String,
+    ) -> anyhow::Result<GetCheckRunsForGitRefResponse>;
 }
 
 #[derive(Debug, Clone)]
+struct GetCheckRunsForGitRefResponse {
+    check_runs: HashMap<String, CheckRun>,
+    head_sha: String,
+    parent_sha: String,
+}
+#[derive(Debug, Clone)]
 struct CheckRun {
     conclusion: CheckConclusion,
-    head_sha: String,
 }
 #[derive(Debug, Clone)]
 enum CheckConclusion {
     Success,
     Failure,
 }
+
 #[async_trait]
 impl GetDataFromGitHub for octocrab::Octocrab {
-    #[instrument(ret, skip(self))]
-    async fn get_check_runs_for_git_branch(
+    #[instrument(skip(self))]
+    async fn get_check_runs_for_git_ref(
         &self,
         owner: String,
         repo: String,
-        branch: String,
-        check_name: String,
-    ) -> anyhow::Result<Vec<CheckRun>> {
-        let checks = &self.checks(owner, repo);
+        git_ref: String,
+    ) -> anyhow::Result<GetCheckRunsForGitRefResponse> {
+        let app_repo_installation = self
+            .apps()
+            .get_repository_installation(owner.clone(), repo.clone())
+            .await?;
+
+        // repo authenticated octocrab client
+        let (octocrab_client, _) = self
+            .installation_and_token(app_repo_installation.id)
+            .await?;
+
+        let commit = octocrab_client
+            .commits(owner.clone(), repo.clone())
+            .get(git_ref.clone())
+            .await?;
+
+        let head_sha = &commit.sha;
+
+        let commit_first_parent = &commit.parents[0];
+
+        let checks = &octocrab_client.checks(owner, repo);
 
         let checks = checks
-            .list_check_runs_for_git_ref(Commitish("heads/".to_owned() + &branch))
+            .list_check_runs_for_git_ref(Commitish(git_ref))
             .send()
             .await
             .context("Failed call to GitHub Checks API")?;
 
-        trace!("Checks: {:?}", checks.clone(),);
+        trace!("Checks count: {:?}", checks.clone().total_count);
 
-        Ok(checks
-            .check_runs
-            .iter()
-            .map(|element| CheckRun {
-                head_sha: element.head_sha.clone(),
-                conclusion: (match element.conclusion.as_deref() {
-                    Some("Success") => CheckConclusion::Success,
-                    _ => CheckConclusion::Failure,
-                }),
-            })
-            .collect())
+        //         todo!("Use the correct endpoint with query param to get only the stuff for one check name.
+        // https://docs.rs/octocrab/latest/octocrab/index.html#http-api
+        // https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28#list-check-runs-for-a-git-reference");
+
+        Ok(GetCheckRunsForGitRefResponse {
+            head_sha: head_sha.to_owned(),
+            parent_sha: commit_first_parent.sha.clone().expect("should be valid"),
+            check_runs: checks
+                .check_runs
+                .iter()
+                .map(|element| {
+                    trace!("Check: {:?}", element);
+                    (element.name.clone(), CheckRun::from(element.clone()))
+                })
+                .collect(),
+        })
+    }
+}
+
+impl From<octocrab::models::checks::CheckRun> for CheckRun {
+    fn from(value: octocrab::models::checks::CheckRun) -> Self {
+        Self {
+            conclusion: (match value.conclusion.as_deref() {
+                Some("success") => CheckConclusion::Success,
+                _ => CheckConclusion::Failure,
+            }),
+        }
     }
 }
 
@@ -333,25 +416,65 @@ mod tests {
 
         let mut mock_github_getter = MockGetDataFromGitHub::new();
         mock_github_getter
-            .expect_get_check_runs_for_git_branch()
+            .expect_get_check_runs_for_git_ref()
             .times(1)
             .with(
                 eq("a-github-user".to_owned()),
                 eq("asdfasdfadfs".to_owned()),
-                eq("feature-branch-2".to_owned()),
-                eq("build".to_owned()),
+                eq("heads/feature-branch-2".to_owned()),
             )
-            .returning(|_, _, _, _| {
-                Ok(vec![CheckRun {
+            .returning(|_, _, _| {
+                Ok(GetCheckRunsForGitRefResponse {
+                    head_sha: "asdf".to_owned(),
+                    parent_sha: successful_sha_for_test.to_owned(),
+                    check_runs: HashMap::from([
+                        (
+                            "test".to_owned(),
+                            CheckRun {
+                                conclusion: CheckConclusion::Failure,
+                            },
+                        ),
+                        (
+                            "build".to_owned(),
+                            CheckRun {
+                                conclusion: CheckConclusion::Success,
+                            },
+                        ),
+                    ]),
+                })
+            });
+        mock_github_getter
+            .expect_get_check_runs_for_git_ref()
+            .times(1)
+            .with(
+                eq("a-github-user".to_owned()),
+                eq("asdfasdfadfs".to_owned()),
+                eq(successful_sha_for_test.to_owned()),
+            )
+            .returning(|_, _, _| {
+                Ok(GetCheckRunsForGitRefResponse {
                     head_sha: successful_sha_for_test.to_owned(),
-                    conclusion: CheckConclusion::Success,
-                }])
+                    parent_sha: "asdfasdfasdfadsf".to_owned(),
+                    check_runs: HashMap::from([
+                        (
+                            "test".to_owned(),
+                            CheckRun {
+                                conclusion: CheckConclusion::Success,
+                            },
+                        ),
+                        (
+                            "build".to_owned(),
+                            CheckRun {
+                                conclusion: CheckConclusion::Success,
+                            },
+                        ),
+                    ]),
+                })
             });
 
         let app_state = AppState {
             plugin_access_token: argocd_plugin_token.to_string(),
             github_data_getter: Arc::new(mock_github_getter),
-            ..Default::default()
         };
 
         debug!(?app_state, "Server App State");

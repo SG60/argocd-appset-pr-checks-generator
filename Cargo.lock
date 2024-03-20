@@ -74,6 +74,7 @@ dependencies = [
  "hyper 1.2.0",
  "hyper-util",
  "indoc",
+ "jsonwebtoken",
  "mockall",
  "octocrab",
  "opentelemetry-stdout",
