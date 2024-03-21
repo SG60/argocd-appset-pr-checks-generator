@@ -224,13 +224,17 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
         branch: String,
         check_names: Vec<String>,
     ) -> anyhow::Result<String> {
+        let authenticated_octocrab_client = self
+            .get_authenticated_repo_client(owner.clone(), repo.clone())
+            .await?;
+
         let max_commits_to_try = 10;
 
         let mut successful_sha: Option<String> = None;
         let mut next_git_ref_to_check = "heads/".to_owned() + &branch;
         let mut commits_tried = 0;
         while successful_sha.is_none() && commits_tried < max_commits_to_try {
-            let check_runs_for_current_ref = self
+            let check_runs_for_current_ref = authenticated_octocrab_client
                 .get_check_runs_for_git_ref(
                     owner.clone(),
                     repo.clone(),
@@ -241,11 +245,12 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
             successful_sha = Some(check_runs_for_current_ref.head_sha);
 
             for i in &check_names {
-                match check_runs_for_current_ref
+                let conclusion = check_runs_for_current_ref
                     .check_runs
                     .get(i)
-                    .map(|x| &x.conclusion)
-                {
+                    .map(|x| &x.conclusion);
+
+                match conclusion {
                     Some(CheckConclusion::Success) => {}
                     _ => {
                         successful_sha = None;
@@ -276,12 +281,20 @@ impl<T: ?Sized + GetDataFromGitHub> GetSuccessfulCheckRuns for T {}
 #[cfg_attr(test, automock)]
 #[async_trait]
 trait GetDataFromGitHub: Send + Sync + Debug + 'static {
+    /// Get runs for an individual ref
     async fn get_check_runs_for_git_ref(
         &self,
         owner: String,
         repo: String,
         git_ref: String,
     ) -> anyhow::Result<GetCheckRunsForGitRefResponse>;
+
+    /// Get an app installation authenticated client for a repo
+    async fn get_authenticated_repo_client(
+        &self,
+        owner: String,
+        repo: String,
+    ) -> anyhow::Result<Box<dyn GetDataFromGitHub>>;
 }
 
 #[derive(Debug, Clone)]
@@ -303,23 +316,30 @@ enum CheckConclusion {
 #[async_trait]
 impl GetDataFromGitHub for octocrab::Octocrab {
     #[instrument(skip(self))]
-    async fn get_check_runs_for_git_ref(
+    async fn get_authenticated_repo_client(
         &self,
         owner: String,
         repo: String,
-        git_ref: String,
-    ) -> anyhow::Result<GetCheckRunsForGitRefResponse> {
+    ) -> anyhow::Result<Box<dyn GetDataFromGitHub>> {
         let app_repo_installation = self
             .apps()
             .get_repository_installation(owner.clone(), repo.clone())
             .await?;
 
         // repo authenticated octocrab client
-        let (octocrab_client, _) = self
-            .installation_and_token(app_repo_installation.id)
-            .await?;
+        let authenticated_client = self.installation(app_repo_installation.id);
 
-        let commit = octocrab_client
+        Ok(Box::new(authenticated_client))
+    }
+
+    #[instrument(skip(self))]
+    async fn get_check_runs_for_git_ref(
+        &self,
+        owner: String,
+        repo: String,
+        git_ref: String,
+    ) -> anyhow::Result<GetCheckRunsForGitRefResponse> {
+        let commit = self
             .commits(owner.clone(), repo.clone())
             .get(git_ref.clone())
             .await?;
@@ -328,7 +348,7 @@ impl GetDataFromGitHub for octocrab::Octocrab {
 
         let commit_first_parent = &commit.parents[0];
 
-        let checks = &octocrab_client.checks(owner, repo);
+        let checks = &self.checks(owner, repo);
 
         let checks = checks
             .list_check_runs_for_git_ref(Commitish(git_ref))
@@ -416,60 +436,68 @@ mod tests {
 
         let mut mock_github_getter = MockGetDataFromGitHub::new();
         mock_github_getter
-            .expect_get_check_runs_for_git_ref()
-            .times(1)
-            .with(
-                eq("a-github-user".to_owned()),
-                eq("asdfasdfadfs".to_owned()),
-                eq("heads/feature-branch-2".to_owned()),
-            )
-            .returning(|_, _, _| {
-                Ok(GetCheckRunsForGitRefResponse {
-                    head_sha: "asdf".to_owned(),
-                    parent_sha: successful_sha_for_test.to_owned(),
-                    check_runs: HashMap::from([
-                        (
-                            "test".to_owned(),
-                            CheckRun {
-                                conclusion: CheckConclusion::Failure,
-                            },
-                        ),
-                        (
-                            "build".to_owned(),
-                            CheckRun {
-                                conclusion: CheckConclusion::Success,
-                            },
-                        ),
-                    ]),
-                })
-            });
-        mock_github_getter
-            .expect_get_check_runs_for_git_ref()
-            .times(1)
-            .with(
-                eq("a-github-user".to_owned()),
-                eq("asdfasdfadfs".to_owned()),
-                eq(successful_sha_for_test.to_owned()),
-            )
-            .returning(|_, _, _| {
-                Ok(GetCheckRunsForGitRefResponse {
-                    head_sha: successful_sha_for_test.to_owned(),
-                    parent_sha: "asdfasdfasdfadsf".to_owned(),
-                    check_runs: HashMap::from([
-                        (
-                            "test".to_owned(),
-                            CheckRun {
-                                conclusion: CheckConclusion::Success,
-                            },
-                        ),
-                        (
-                            "build".to_owned(),
-                            CheckRun {
-                                conclusion: CheckConclusion::Success,
-                            },
-                        ),
-                    ]),
-                })
+            .expect_get_authenticated_repo_client()
+            .once()
+            .returning(|_, _| {
+                let mut mock_github_authed_client = MockGetDataFromGitHub::new();
+                mock_github_authed_client
+                    .expect_get_check_runs_for_git_ref()
+                    .times(1)
+                    .with(
+                        eq("a-github-user".to_owned()),
+                        eq("asdfasdfadfs".to_owned()),
+                        eq("heads/feature-branch-2".to_owned()),
+                    )
+                    .returning(|_, _, _| {
+                        Ok(GetCheckRunsForGitRefResponse {
+                            head_sha: "asdf".to_owned(),
+                            parent_sha: successful_sha_for_test.to_owned(),
+                            check_runs: HashMap::from([
+                                (
+                                    "test".to_owned(),
+                                    CheckRun {
+                                        conclusion: CheckConclusion::Failure,
+                                    },
+                                ),
+                                (
+                                    "build".to_owned(),
+                                    CheckRun {
+                                        conclusion: CheckConclusion::Success,
+                                    },
+                                ),
+                            ]),
+                        })
+                    });
+                mock_github_authed_client
+                    .expect_get_check_runs_for_git_ref()
+                    .times(1)
+                    .with(
+                        eq("a-github-user".to_owned()),
+                        eq("asdfasdfadfs".to_owned()),
+                        eq(successful_sha_for_test.to_owned()),
+                    )
+                    .returning(|_, _, _| {
+                        Ok(GetCheckRunsForGitRefResponse {
+                            head_sha: successful_sha_for_test.to_owned(),
+                            parent_sha: "asdfasdfasdfadsf".to_owned(),
+                            check_runs: HashMap::from([
+                                (
+                                    "test".to_owned(),
+                                    CheckRun {
+                                        conclusion: CheckConclusion::Success,
+                                    },
+                                ),
+                                (
+                                    "build".to_owned(),
+                                    CheckRun {
+                                        conclusion: CheckConclusion::Success,
+                                    },
+                                ),
+                            ]),
+                        })
+                    });
+
+                Ok(Box::new(mock_github_authed_client))
             });
 
         let app_state = AppState {
