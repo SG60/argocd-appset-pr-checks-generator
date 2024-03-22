@@ -47,12 +47,11 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: test
-        run: nix-shell --command "cargo test"
+        run: nix develop -c cargo test
       - name: build
         env:
           TARGET_CC: clang
-        run: nix-shell --arg targetSystem \"${{ matrix.target.rust }}\" --run \
-          "cargo build --target ${{ matrix.target.rust }} --release"
+        run: nix develop .#${{ matrix.target.rust }} -c cargo build --target ${{ matrix.target.rust }} --release
 
       - name: Login to Docker registry
         uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3

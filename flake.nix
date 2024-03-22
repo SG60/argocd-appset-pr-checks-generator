@@ -9,7 +9,8 @@
       {
         devShells = {
           # default = with pkgs; mkShellNoCC { packages = [ protobuf ]; };
-          default = import ./shell.nix { inherit pkgs; };
+          default = import ./shell.nix { inherit nixpkgs pkgs system; targetSystem = system; };
+          aarch64-unknown-linux-musl = import ./shell.nix { inherit nixpkgs pkgs system; targetSystem = "aarch64-unknown-linux-musl"; };
         };
       });
 }
