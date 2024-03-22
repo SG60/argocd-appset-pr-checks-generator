@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     extract::State,
@@ -181,15 +181,21 @@ Body: {:?}",
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let result: ResponseJsonPayload = ResponseJsonPayload {
+    let result_vector = match most_recent_successful_sha {
+        Some(sha_string) => vec![ResponseParameters {
+            most_recent_successful_sha: sha_string,
+        }],
+        // just produce an empty vector if there is no valid commit
+        None => Vec::new(),
+    };
+
+    let result_payload: ResponseJsonPayload = ResponseJsonPayload {
         output: ResponseJsonPayloadOutput {
-            parameters: vec![ResponseParameters {
-                most_recent_successful_sha,
-            }],
+            parameters: result_vector,
         },
     };
 
-    Ok(axum::Json(result))
+    Ok(axum::Json(result_payload))
 }
 
 #[derive(Deserialize, Debug)]
@@ -213,6 +219,9 @@ struct ArgoCDParameters {
 trait GetSuccessfulCheckRuns: GetDataFromGitHub {
     /// Get completed checks for the specified git branch
     ///
+    /// Returns the most recent commit SHA that has successfully completed
+    /// the specified checks.
+    ///
     /// # Errors
     ///
     /// This function will return an error if the Github API request fails
@@ -223,7 +232,7 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
         repo: String,
         branch: String,
         check_names: Vec<String>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Option<String>> {
         let authenticated_octocrab_client = self
             .get_authenticated_repo_client(owner.clone(), repo.clone())
             .await?;
@@ -240,7 +249,8 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
                     repo.clone(),
                     next_git_ref_to_check.clone(),
                 )
-                .await?;
+                .await
+                .with_context(|| format!("Error getting check runs for {next_git_ref_to_check}"))?;
 
             successful_sha = Some(check_runs_for_current_ref.head_sha);
 
@@ -268,10 +278,11 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
         );
 
         match successful_sha {
-            Some(expr) => Ok(expr),
-            None => Err(anyhow!(
-                "No valid commits within {max_commits_to_try} commits"
-            )),
+            Some(expr) => Ok(Some(expr)),
+            None => {
+                debug!("No valid commits within {max_commits_to_try} commits");
+                Ok(None)
+            }
         }
     }
 }
