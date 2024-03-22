@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       annotations:
-        instrumentation.opentelemetry.io/inject-sdk: "true"
+        instrumentation.opentelemetry.io/inject-sdk: "telemetry/default-instrumentation"
     spec:
       containers:
         - name: argocd-appset-checked-pr-generator
