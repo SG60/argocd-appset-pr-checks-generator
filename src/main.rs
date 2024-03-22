@@ -12,7 +12,12 @@ use axum::{
 use mockall::automock;
 use octocrab::params::repos::Commitish;
 use serde::Deserialize;
-use std::{collections::HashMap, default, fmt::Debug, sync::Arc};
+use std::{
+    collections::HashMap,
+    default,
+    fmt::{Debug, Display},
+    sync::Arc,
+};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, trace};
@@ -288,6 +293,18 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
 }
 
 impl<T: ?Sized + GetDataFromGitHub> GetSuccessfulCheckRuns for T {}
+
+#[derive(Debug)]
+enum GetCheckRunsForGitRefError {
+    ClientFetchError,
+    NothingFound,
+}
+impl Display for GetCheckRunsForGitRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+impl std::error::Error for GetCheckRunsForGitRefError {}
 
 #[cfg_attr(test, automock)]
 #[async_trait]
