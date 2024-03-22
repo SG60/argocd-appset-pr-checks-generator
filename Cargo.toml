@@ -36,3 +36,7 @@ wiremock = "0.5.22"
 # [patch.crates-io]
 # # temporarily use a local copy of my tracing utils crate
 # opentelemetry-tracing-utils = { path = "../eventspider/eventspider-backend/packages/opentelemetry-tracing-utils" }
+
+[lints.clippy]
+pedantic = "warn"
+cargo = "warn"
