@@ -40,4 +40,4 @@ wiremock = "0.5.22"
 
 [lints.clippy]
 pedantic = "warn"
-cargo = "warn"
+# cargo = "warn"
