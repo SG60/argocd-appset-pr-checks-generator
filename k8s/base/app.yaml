@@ -27,7 +27,23 @@ spec:
           image: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator
           env:
             - name: RUST_LOG
-              value: argocd_appset_checked_pr_generator=trace
+              value: info,argocd_appset_checked_pr_generator=trace
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-appset-checked-pr-plugin-secret
+                  key: GITHUB_APP_PRIVATE_KEY
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-appset-checked-pr-plugin-secret
+                  key: GITHUB_APP_ID
+            - name: ARGOCD_PLUGIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-appset-checked-pr-plugin-secret
+                  key: ARGOCD_PLUGIN_TOKEN
+          envFrom:
           resources:
             requests:
               cpu: 5m

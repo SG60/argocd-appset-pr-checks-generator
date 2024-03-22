@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checked-pr-plugin
+  namespace: argocd
+data:
+  token: "$argocd-external:plugin.appset-checked-pr.token"
+  baseUrl: "http://argocd-appset-checked-pr-generator.argocd.svc.cluster.local."
