@@ -149,7 +149,7 @@ struct ResponseParameters {
     most_recent_successful_sha: String,
 }
 
-#[tracing::instrument(ret, err, skip(state, parts, body))]
+#[tracing::instrument(ret, err, skip(state, parts))]
 async fn post_getparams_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -225,7 +225,7 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
     /// # Errors
     ///
     /// This function will return an error if the Github API request fails
-    #[instrument(ret, err)]
+    #[instrument(ret, err(Debug))]
     async fn get_first_successful_check_runs_for_git_branch(
         &self,
         owner: String,
@@ -243,14 +243,22 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
         let mut next_git_ref_to_check = "heads/".to_owned() + &branch;
         let mut commits_tried = 0;
         while successful_sha.is_none() && commits_tried < max_commits_to_try {
-            let check_runs_for_current_ref = authenticated_octocrab_client
+            let check_runs_for_current_ref_result = authenticated_octocrab_client
                 .get_check_runs_for_git_ref(
                     owner.clone(),
                     repo.clone(),
                     next_git_ref_to_check.clone(),
                 )
                 .await
-                .with_context(|| format!("Error getting check runs for {next_git_ref_to_check}"))?;
+                .with_context(|| format!("Error getting check runs for {next_git_ref_to_check}"));
+
+            trace!(
+                checked_git_ref = next_git_ref_to_check,
+                "Result of check run: {:?}",
+                check_runs_for_current_ref_result
+            );
+
+            let check_runs_for_current_ref = check_runs_for_current_ref_result?;
 
             successful_sha = Some(check_runs_for_current_ref.head_sha);
 
@@ -326,7 +334,10 @@ enum CheckConclusion {
 
 #[async_trait]
 impl GetDataFromGitHub for octocrab::Octocrab {
-    #[instrument(skip(self))]
+    #[instrument(skip(self), err(Debug))]
+    // Required for some reason due to the combination of async_trait macro and tracing
+    // instrumentation macro
+    #[allow(clippy::blocks_in_conditions)]
     async fn get_authenticated_repo_client(
         &self,
         owner: String,
@@ -343,7 +354,10 @@ impl GetDataFromGitHub for octocrab::Octocrab {
         Ok(Box::new(authenticated_client))
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), err)]
+    // Required for some reason due to the combination of async_trait macro and tracing
+    // instrumentation macro
+    #[allow(clippy::blocks_in_conditions)]
     async fn get_check_runs_for_git_ref(
         &self,
         owner: String,
