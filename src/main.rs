@@ -12,7 +12,7 @@ use axum::{
 use mockall::automock;
 use octocrab::params::repos::Commitish;
 use serde::Deserialize;
-use std::{collections::HashMap, default, fmt::Debug, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, trace};
@@ -29,7 +29,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             github_data_getter: std::sync::Arc::new(octocrab::Octocrab::default()),
-            plugin_access_token: default::Default::default(),
+            plugin_access_token: String::default(),
         }
     }
 }
@@ -128,11 +128,11 @@ async fn verify_bearer_auth_secret(
         .and_then(|value| value.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if format!("Bearer {}", state.plugin_access_token) != auth_header {
-        return Err(StatusCode::FORBIDDEN);
-    } else {
+    if format!("Bearer {}", state.plugin_access_token) == auth_header {
         info!("auth verification successful");
-        return Ok(next.run(request).await);
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::FORBIDDEN)
     }
 }
 
@@ -173,9 +173,9 @@ Body: {:?}",
     let most_recent_successful_sha = state
         .github_data_getter
         .get_first_successful_check_runs_for_git_branch(
-            parameters.repo_owner.to_owned(),
-            parameters.repo_name.to_owned(),
-            parameters.branch_name.to_owned(),
+            parameters.repo_owner.clone(),
+            parameters.repo_name.clone(),
+            parameters.branch_name.clone(),
             parameters.required_checks.clone(),
         )
         .await
@@ -270,7 +270,7 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
 
                 match conclusion {
                     Some(CheckConclusion::Success) => {}
-                    _ => {
+                    None | Some(CheckConclusion::Failure) => {
                         successful_sha = None;
                         next_git_ref_to_check = check_runs_for_current_ref.parent_sha;
                         break;
@@ -285,12 +285,11 @@ trait GetSuccessfulCheckRuns: GetDataFromGitHub {
             successful_sha, "Finished getting commit checks"
         );
 
-        match successful_sha {
-            Some(expr) => Ok(Some(expr)),
-            None => {
-                debug!("No valid commits within {max_commits_to_try} commits");
-                Ok(None)
-            }
+        if let Some(expr) = successful_sha {
+            Ok(Some(expr))
+        } else {
+            debug!("No valid commits within {max_commits_to_try} commits");
+            Ok(None)
         }
     }
 }
@@ -436,6 +435,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn successful_getparams_request() {
         test_setup();
 
@@ -542,7 +542,7 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/getparams.execute")
                     .method("POST")
-                    .header("Authorization", format!("Bearer {}", argocd_plugin_token))
+                    .header("Authorization", format!("Bearer {argocd_plugin_token}"))
                     .header("Content-Type", "application/json")
                     .body(request_body)
                     .unwrap(),
