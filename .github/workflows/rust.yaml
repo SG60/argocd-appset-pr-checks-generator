@@ -26,7 +26,7 @@ jobs:
           - rust: aarch64-unknown-linux-musl
             docker: linux/arm64
     steps:
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - uses: rui314/setup-mold@65ebd6e8eaa076198082114e4a8ab5c209b13ec4 # v1
 
@@ -119,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           token: ${{ secrets.WRITE_BACK_TO_REPO_TOKEN }}
 
