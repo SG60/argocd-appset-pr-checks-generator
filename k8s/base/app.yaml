@@ -27,7 +27,7 @@ spec:
           image: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator
           env:
             - name: RUST_LOG
-              value: info,tower_http,argocd_appset_checked_pr_generator=debug
+              value: info,tower_http,opentelemetry_tracing_utils,reqwest_tracing,argocd_appset_checked_pr_generator=debug
             - name: GITHUB_APP_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
