@@ -347,7 +347,7 @@ impl GetDataFromGitHub for octocrab::Octocrab {
             .await?;
 
         // repo authenticated octocrab client
-        let authenticated_client = self.installation(app_repo_installation.id);
+        let authenticated_client = self.installation(app_repo_installation.id).context("Failed to get authenticated client")?;
 
         Ok(Box::new(authenticated_client))
     }
