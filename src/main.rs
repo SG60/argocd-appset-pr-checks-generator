@@ -11,10 +11,10 @@ use axum::{
 #[cfg(test)]
 use mockall::automock;
 use octocrab::params::repos::Commitish;
+use opentelemetry_tracing_utils::make_tower_http_otel_trace_layer;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, trace};
 
 #[derive(Clone, Debug)]
@@ -105,13 +105,12 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/getparams.execute", post(post_getparams_handler))
         .layer(
             ServiceBuilder::new()
+                // tower_http trace logging, and context propagation
+                .layer(make_tower_http_otel_trace_layer())
                 .layer(middleware::from_fn_with_state(
                     state.clone(),
                     verify_bearer_auth_secret,
-                ))
-                // tower_http trace logging
-                .layer(TraceLayer::new_for_http())
-                .map_request(opentelemetry_tracing_utils::extract_trace_context),
+                )),
         )
         .with_state(state)
 }
@@ -348,7 +347,7 @@ impl GetDataFromGitHub for octocrab::Octocrab {
             .await?;
 
         // repo authenticated octocrab client
-        let authenticated_client = self.installation(app_repo_installation.id);
+        let authenticated_client = self.installation(app_repo_installation.id).context("Failed to get authenticated client")?;
 
         Ok(Box::new(authenticated_client))
     }
