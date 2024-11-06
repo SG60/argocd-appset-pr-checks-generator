@@ -3,6 +3,9 @@ kind: Kustomization
 labels:
   - pairs:
       app.kubernetes.io/version: eb5e546f44b96102672bf18bffde958813901a32
+    # Include these labels in the pod template, but don't include them in selectors,
+    # as they are supposed to be immutable!
+    includeTemplates: true
 commonLabels:
   app.kubernetes.io/instance: argocd-appset-checked-pr-generator
   app.kubernetes.io/name: argocd-appset-checked-pr-generator
