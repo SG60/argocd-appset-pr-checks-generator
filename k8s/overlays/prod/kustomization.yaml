@@ -1,11 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# Include these labels in the pod template, but don't include them in selectors,
+# as they are supposed to be immutable!
 labels:
-  - pairs:
-      app.kubernetes.io/version: eb5e546f44b96102672bf18bffde958813901a32
-    # Include these labels in the pod template, but don't include them in selectors,
-    # as they are supposed to be immutable!
-    includeTemplates: true
+  - includeTemplates: true
+    pairs:
+      app.kubernetes.io/version: 6bce19921aa0cfbbea07261a8c4461a9ad6742ab
 commonLabels:
   app.kubernetes.io/instance: argocd-appset-checked-pr-generator
   app.kubernetes.io/name: argocd-appset-checked-pr-generator
@@ -13,6 +13,6 @@ resources:
   - ../../base
 namespace: argocd-appset-checked-pr-generator
 images:
-  - digest: sha256:500de8ad8662edf5c829128db4690c555322a75267d5a65cb5e28147168e8a95
+  - digest: sha256:86d16eacebefcfebac77b702df96de96d6f3c4568374ed5cc94882a9b0e43b68
     name: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator
-    newName: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator:sha-eb5e546f44b96102672bf18bffde958813901a32
+    newName: lhr.ocir.io/lrdyqp2xtoja/argocd-appset-checked-pr-generator:sha-6bce19921aa0cfbbea07261a8c4461a9ad6742ab
