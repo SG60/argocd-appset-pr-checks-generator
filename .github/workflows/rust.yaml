@@ -38,7 +38,7 @@ jobs:
           cache-all-crates: "true"
           cache-on-failure: "true"
 
-      - uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3.0.0
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
 
       # nix dev shell setup
       - uses: DeterminateSystems/nix-installer-action@v15
