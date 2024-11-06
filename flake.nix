@@ -3,14 +3,15 @@
 
   outputs = { nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
-      let pkgs = import nixpkgs { inherit system; };
-
+      let
+        pkgs = import nixpkgs { inherit system; };
+        pkgsCross = pkgs.pkgsCross;
+        dev-shell-path = ./shell.nix;
       in
       {
         devShells = {
-          # default = with pkgs; mkShellNoCC { packages = [ protobuf ]; };
-          default = import ./shell.nix { inherit nixpkgs pkgs system; targetSystem = system; };
-          aarch64-unknown-linux-musl = import ./shell.nix { inherit nixpkgs pkgs system; targetSystem = "aarch64-unknown-linux-musl"; };
+          default = pkgs.callPackage dev-shell-path { };
+          aarch64-unknown-linux-musl = pkgsCross.aarch64-multiplatform-musl.callPackage dev-shell-path { };
         };
       });
 }
