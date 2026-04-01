@@ -103,7 +103,7 @@ jobs:
           echo "image digest: \`${DOCKER_IMAGE_DIGEST}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # 0.29.0
+        uses: aquasecurity/trivy-action@9c000ba9d482773cbbc2c3544d61b109bc9eb832 # 0.29.0
         with:
           image-ref: ${{ env.DOCKER_CONTAINER_IMAGE_BASE }}:sha-${{ env.COMMIT_SHA }}
           format: "table"
